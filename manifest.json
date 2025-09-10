@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Filigrane Batch Watermarker",
+  "version": "1.0",
+  "description": "Automatise l'ajout de filigranes sur plusieurs fichiers via filigrane.beta.gouv.fr",
+  "permissions": [
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://api.filigrane.beta.gouv.fr/*"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}
