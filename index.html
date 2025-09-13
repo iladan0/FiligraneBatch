@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Application Filigrane en Série</title>
+  
+  <!-- *** AJOUT IMPORTANT : Inclusion de la bibliothèque JSZip *** -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f4f7f9;
+      color: #333;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 20px;
+      box-sizing: border-box;
+    }
+    #app-container {
+      background-color: #ffffff;
+      padding: 30px;
+      border-radius: 8px;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+      width: 100%;
+      max-width: 450px;
+    }
+    h1 {
+      text-align: center;
+      color: #005c9c;
+      margin-top: 0;
+      margin-bottom: 25px;
+    }
+    label {
+      font-weight: 600;
+      display: block;
+      margin-bottom: 8px;
+    }
+    input[type="text"] {
+      width: 100%;
+      margin-bottom: 20px;
+      padding: 12px;
+      box-sizing: border-box;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    input[type="file"] {
+        width: 100%;
+        margin-bottom: 20px;
+    }
+    .button-group {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 20px;
+    }
+    button {
+      flex-grow: 1;
+      padding: 12px;
+      font-size: 16px;
+      font-weight: bold;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background-color 0.2s;
+    }
+    #start-btn {
+      background-color: #007bff;
+      color: white;
+    }
+    #start-btn:hover {
+      background-color: #0056b3;
+    }
+    #reset-btn {
+        background-color: #6c757d;
+        color: white;
+    }
+    #reset-btn:hover {
+        background-color: #5a6268;
+    }
+    button:disabled {
+      background-color: #a0a0a0;
+      cursor: not-allowed;
+    }
+    #merge-container {
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+    }
+    #merge-container label {
+        margin-bottom: 0;
+        margin-left: 8px;
+        font-weight: normal;
+    }
+    #status {
+      font-size: 0.9em;
+      white-space: pre-wrap;
+      text-align: center;
+      padding: 10px;
+      background-color: #e9ecef;
+      border-radius: 4px;
+      min-height: 40px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="app-container">
+    <h1>Filigrane en Série</h1>
+    
+    <label for="file-picker">Sélectionner les fichiers :</label>
+    <input type="file" id="file-picker" multiple>
+  
+    <div id="merge-container">
+      <input type="checkbox" id="merge-checkbox" name="merge-checkbox">
+      <label for="merge-checkbox">Fusionner en un seul PDF</label>
+    </div>
+  
+    <label for="watermark-text">Texte du filigrane :</label>
+    <input type="text" id="watermark-text" placeholder="Saisir le texte du filigrane...">
+  
+    <div class="button-group">
+        <button id="start-btn">Lancer le traitement</button>
+        <button id="reset-btn" type="button">Réinitialiser</button>
+    </div>
+  
+    <div id="status">Prêt à commencer.</div>
+  </div>
+
+  <script>
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+    const filePicker = document.getElementById('file-picker'); 
+    const watermarkText = document.getElementById('watermark-text');
+    const mergeCheckbox = document.getElementById('merge-checkbox');
+    const statusDiv = document.getElementById('status');
+    const startButton = document.getElementById('start-btn');
+    const resetButton = document.getElementById('reset-btn');
+
+    function triggerDownload(blobUrl, filename) {
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.setAttribute('download', filename);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(blobUrl);
+    }
+
+    // *** MODIFICATION : Cette fonction ne télécharge plus, elle retourne le fichier traité (le "blob") ***
+    async function fetchWatermarkedFileAsBlob(file, watermarkText, totalFiles, currentIndex) {
+        statusDiv.textContent = `Traitement ${currentIndex} / ${totalFiles} : ${file.name}...`;
+        const formData = new FormData();
+        formData.append('files[]', file);
+        formData.append('watermark', watermarkText);
+        try {
+            const initialResponse = await fetch('https://api.filigrane.beta.gouv.fr/api/document/files', { method: 'POST', body: formData });
+            if (!initialResponse.ok) throw new Error(`L'envoi a échoué: ${initialResponse.statusText}`);
+            const { token } = await initialResponse.json();
+            if (!token) throw new Error('Aucun jeton reçu du serveur.');
+            
+            let isReady = false;
+            let attempts = 0;
+            while (!isReady && attempts < 60) {
+                await sleep(1000);
+                const statusResponse = await fetch(`https://api.filigrane.beta.gouv.fr/api/document/url/${token}`);
+                if (statusResponse.ok) {
+                    const statusData = await statusResponse.json();
+                    if (statusData.url) { isReady = true; }
+                } else if (statusResponse.status === 409) { attempts++; } else { throw new Error(`Le suivi a échoué: ${statusResponse.statusText}`); }
+            }
+            if (!isReady) throw new Error("Le traitement du fichier a dépassé le temps maximum (60s).");
+            
+            const downloadUrl = `https://api.filigrane.beta.gouv.fr/api/document/${token}`;
+            const fileResponse = await fetch(downloadUrl);
+            return await fileResponse.blob(); // Retourne le contenu du fichier
+        } catch (error) {
+            console.error(`Erreur avec ${file.name} :`, error);
+            statusDiv.textContent = `Erreur avec ${file.name}. Passage au suivant...`;
+            await sleep(1500); // Petite pause pour que l'utilisateur voie l'erreur
+            return null; // Retourne null en cas d'échec
+        }
+    }
+
+    async function processAllFilesAtOnce(files, watermarkText) {
+        // Cette fonction reste inchangée
+        statusDiv.textContent = `Traitement de ${files.length} fichiers en un seul lot...`;
+        const formData = new FormData();
+        for (const file of files) { formData.append('files[]', file); }
+        formData.append('watermark', watermarkText);
+        try {
+            const initialResponse = await fetch('https://api.filigrane.beta.gouv.fr/api/document/files', { method: 'POST', body: formData });
+            if (!initialResponse.ok) throw new Error(`L'envoi a échoué: ${initialResponse.statusText}`);
+            const { token } = await initialResponse.json();
+            if (!token) throw new Error('Aucun jeton reçu du serveur.');
+            statusDiv.textContent = `Lot envoyé. En attente de fusion et traitement...`;
+            let isReady = false;
+            let attempts = 0;
+            while (!isReady && attempts < 60) {
+                await sleep(1000);
+                const statusResponse = await fetch(`https://api.filigrane.beta.gouv.fr/api/document/url/${token}`);
+                if (statusResponse.ok) {
+                    const statusData = await statusResponse.json();
+                    if (statusData.url) { isReady = true; }
+                } else if (statusResponse.status === 409) { attempts++; } else { throw new Error(`Le suivi a échoué: ${statusResponse.statusText}`); }
+            }
+            if (!isReady) throw new Error("Le traitement du lot a dépassé le temps maximum (60s).");
+            statusDiv.textContent = `Téléchargement du fichier fusionné...`;
+            const downloadUrl = `https://api.filigrane.beta.gouv.fr/api/document/${token}`;
+            const newFilename = 'document_fusionne_filigrane.pdf';
+            const fileResponse = await fetch(downloadUrl);
+            const fileBlob = await fileResponse.blob();
+            const blobUrl = URL.createObjectURL(fileBlob);
+            triggerDownload(blobUrl, newFilename);
+            statusDiv.textContent = 'Le fichier fusionné a été traité et téléchargé avec succès.';
+            return true;
+        } catch (error) {
+            statusDiv.textContent = `Erreur lors du traitement par lot : ${error.message}`;
+            console.error('An error occurred during batch processing:', error);
+            return false;
+        }
+    }
+
+    startButton.addEventListener('click', async () => {
+        const files = Array.from(filePicker.files).filter(file => /\.(jpe?g|png|heic|pdf)$/i.test(file.name));
+        
+        if (files.length === 0) {
+            statusDiv.textContent = "Veuillez sélectionner des fichiers valides (pdf, jpg, png, heic).";
+            return;
+        }
+        if (!watermarkText.value) {
+            statusDiv.textContent = 'Veuillez saisir le texte du filigrane.';
+            return;
+        }
+
+        startButton.disabled = true;
+        resetButton.disabled = true;
+
+        if (mergeCheckbox.checked) {
+            await processAllFilesAtOnce(files, watermarkText.value);
+        } else {
+            // *** NOUVELLE LOGIQUE POUR CRÉER UN ZIP ***
+            const processedFiles = [];
+            
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const blob = await fetchWatermarkedFileAsBlob(file, watermarkText.value, files.length, i + 1);
+                if (blob) {
+                    const originalName = file.name.substring(0, file.name.lastIndexOf('.'));
+                    const newFilename = `${originalName}_filigrane.pdf`;
+                    processedFiles.push({ name: newFilename, data: blob });
+                }
+            }
+
+            if (processedFiles.length > 0) {
+                statusDiv.textContent = 'Création du fichier ZIP...';
+                const zip = new JSZip();
+                processedFiles.forEach(file => {
+                    zip.file(file.name, file.data);
+                });
+
+                zip.generateAsync({ type: "blob" })
+                   .then(function(content) {
+                        const blobUrl = URL.createObjectURL(content);
+                        triggerDownload(blobUrl, "fichiers_filigranes.zip");
+                        statusDiv.textContent = `Traitement terminé. ${processedFiles.length} sur ${files.length} fichiers compressés.`;
+                   });
+            } else {
+                statusDiv.textContent = 'Aucun fichier n\'a pu être traité.';
+            }
+        }
+        startButton.disabled = false;
+        resetButton.disabled = false;
+    });
+
+    resetButton.addEventListener('click', () => {
+        filePicker.value = null;
+        watermarkText.value = '';
+        mergeCheckbox.checked = false;
+        statusDiv.textContent = 'Prêt à commencer.';
+        startButton.disabled = false;
+        resetButton.disabled = false;
+    });
+  </script>
+</body>
+</html>
